@@ -471,7 +471,7 @@ async def post_init(application: Application) -> None:
 def build_application() -> Application:
     config = load_config()
     database = Database(config.db_path)
-    market = MarketService()
+    market = MarketService(config.market_data_providers)
     knowledge = KnowledgeBase(database, config.storage_dir)
     renderer = Renderer(config.storage_dir)
     llm = MultiLLM(config)

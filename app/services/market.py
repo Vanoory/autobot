@@ -1,15 +1,65 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from statistics import mean
 from typing import Any
 
 import httpx
 import pandas as pd
 
 
+LOGGER = logging.getLogger(__name__)
+
 BINANCE_API = "https://api.binance.com"
+BYBIT_API = "https://api.bybit.com"
+OKX_API = "https://app.okx.com"
+
+INTERVAL_BINANCE = {
+    "1m": "1m",
+    "3m": "3m",
+    "5m": "5m",
+    "15m": "15m",
+    "30m": "30m",
+    "1h": "1h",
+    "2h": "2h",
+    "4h": "4h",
+    "6h": "6h",
+    "12h": "12h",
+    "1d": "1d",
+    "1w": "1w",
+    "1M": "1M",
+}
+INTERVAL_BYBIT = {
+    "1m": "1",
+    "3m": "3",
+    "5m": "5",
+    "15m": "15",
+    "30m": "30",
+    "1h": "60",
+    "2h": "120",
+    "4h": "240",
+    "6h": "360",
+    "12h": "720",
+    "1d": "D",
+    "1w": "W",
+    "1M": "M",
+}
+INTERVAL_OKX = {
+    "1m": "1m",
+    "3m": "3m",
+    "5m": "5m",
+    "15m": "15m",
+    "30m": "30m",
+    "1h": "1H",
+    "2h": "2H",
+    "4h": "4H",
+    "6h": "6Hutc",
+    "12h": "12Hutc",
+    "1d": "1Dutc",
+    "1w": "1Wutc",
+    "1M": "1Mutc",
+}
 
 
 @dataclass(slots=True)
@@ -29,34 +79,172 @@ class SignalCandidate:
 
 
 class MarketService:
+    def __init__(self, providers: list[str] | None = None) -> None:
+        configured = [item.strip().lower() for item in (providers or ["bybit", "okx", "binance"]) if item.strip()]
+        self.providers = [item for item in configured if item in {"bybit", "okx", "binance"}] or ["bybit", "okx", "binance"]
+
     async def fetch_klines(self, symbol: str, interval: str = "1h", limit: int = 220) -> pd.DataFrame:
-        params = {"symbol": symbol, "interval": interval, "limit": limit}
+        errors: list[str] = []
+        for provider in self.providers:
+            try:
+                rows = await self._fetch_klines_from_provider(provider, symbol, interval, limit)
+                if not rows:
+                    raise RuntimeError("empty candles")
+                return self._add_indicators(pd.DataFrame(rows))
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{provider}: {exc}")
+                LOGGER.warning("Klines provider failed for %s via %s: %s", symbol, provider, exc)
+        raise RuntimeError(f"Unable to fetch klines for {symbol}. {' | '.join(errors)}")
+
+    async def fetch_price(self, symbol: str) -> float:
+        errors: list[str] = []
+        for provider in self.providers:
+            try:
+                return await self._fetch_price_from_provider(provider, symbol)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{provider}: {exc}")
+                LOGGER.warning("Price provider failed for %s via %s: %s", symbol, provider, exc)
+        raise RuntimeError(f"Unable to fetch price for {symbol}. {' | '.join(errors)}")
+
+    async def _fetch_klines_from_provider(
+        self,
+        provider: str,
+        symbol: str,
+        interval: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        if provider == "binance":
+            return await self._fetch_klines_binance(symbol, interval, limit)
+        if provider == "bybit":
+            return await self._fetch_klines_bybit(symbol, interval, limit)
+        if provider == "okx":
+            return await self._fetch_klines_okx(symbol, interval, limit)
+        raise RuntimeError(f"Unsupported provider: {provider}")
+
+    async def _fetch_price_from_provider(self, provider: str, symbol: str) -> float:
+        if provider == "binance":
+            return await self._fetch_price_binance(symbol)
+        if provider == "bybit":
+            return await self._fetch_price_bybit(symbol)
+        if provider == "okx":
+            return await self._fetch_price_okx(symbol)
+        raise RuntimeError(f"Unsupported provider: {provider}")
+
+    async def _fetch_klines_binance(self, symbol: str, interval: str, limit: int) -> list[dict[str, Any]]:
+        params = {"symbol": symbol, "interval": self._map_interval(interval, INTERVAL_BINANCE, "binance"), "limit": limit}
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.get(f"{BINANCE_API}/api/v3/klines", params=params)
             response.raise_for_status()
             raw = response.json()
+        return [
+            {
+                "open_time": datetime.fromtimestamp(item[0] / 1000, UTC),
+                "open": float(item[1]),
+                "high": float(item[2]),
+                "low": float(item[3]),
+                "close": float(item[4]),
+                "volume": float(item[5]),
+            }
+            for item in raw
+        ]
 
-        rows: list[dict[str, Any]] = []
-        for item in raw:
-            rows.append(
-                {
-                    "open_time": datetime.fromtimestamp(item[0] / 1000, UTC),
-                    "open": float(item[1]),
-                    "high": float(item[2]),
-                    "low": float(item[3]),
-                    "close": float(item[4]),
-                    "volume": float(item[5]),
-                }
-            )
-        df = pd.DataFrame(rows)
-        return self._add_indicators(df)
-
-    async def fetch_price(self, symbol: str) -> float:
+    async def _fetch_price_binance(self, symbol: str) -> float:
         async with httpx.AsyncClient(timeout=15) as client:
             response = await client.get(f"{BINANCE_API}/api/v3/ticker/price", params={"symbol": symbol})
             response.raise_for_status()
             data = response.json()
         return float(data["price"])
+
+    async def _fetch_klines_bybit(self, symbol: str, interval: str, limit: int) -> list[dict[str, Any]]:
+        params = {
+            "category": "spot",
+            "symbol": symbol,
+            "interval": self._map_interval(interval, INTERVAL_BYBIT, "bybit"),
+            "limit": min(limit, 1000),
+        }
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.get(f"{BYBIT_API}/v5/market/kline", params=params)
+            response.raise_for_status()
+            data = response.json()
+        if int(data.get("retCode", -1)) != 0:
+            raise RuntimeError(data.get("retMsg") or "unexpected Bybit response")
+        raw = data.get("result", {}).get("list", [])
+        rows = sorted(raw, key=lambda item: int(item[0]))
+        return [
+            {
+                "open_time": datetime.fromtimestamp(int(item[0]) / 1000, UTC),
+                "open": float(item[1]),
+                "high": float(item[2]),
+                "low": float(item[3]),
+                "close": float(item[4]),
+                "volume": float(item[5]),
+            }
+            for item in rows
+        ]
+
+    async def _fetch_price_bybit(self, symbol: str) -> float:
+        params = {"category": "spot", "symbol": symbol}
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.get(f"{BYBIT_API}/v5/market/tickers", params=params)
+            response.raise_for_status()
+            data = response.json()
+        if int(data.get("retCode", -1)) != 0:
+            raise RuntimeError(data.get("retMsg") or "unexpected Bybit response")
+        items = data.get("result", {}).get("list", [])
+        if not items:
+            raise RuntimeError("empty Bybit ticker response")
+        return float(items[0]["lastPrice"])
+
+    async def _fetch_klines_okx(self, symbol: str, interval: str, limit: int) -> list[dict[str, Any]]:
+        params = {
+            "instId": self._to_okx_symbol(symbol),
+            "bar": self._map_interval(interval, INTERVAL_OKX, "okx"),
+            "limit": min(limit, 300),
+        }
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.get(f"{OKX_API}/api/v5/market/candles", params=params)
+            response.raise_for_status()
+            data = response.json()
+        if str(data.get("code", "-1")) != "0":
+            raise RuntimeError(data.get("msg") or "unexpected OKX response")
+        raw = data.get("data", [])
+        rows = sorted(raw, key=lambda item: int(item[0]))
+        return [
+            {
+                "open_time": datetime.fromtimestamp(int(item[0]) / 1000, UTC),
+                "open": float(item[1]),
+                "high": float(item[2]),
+                "low": float(item[3]),
+                "close": float(item[4]),
+                "volume": float(item[5]),
+            }
+            for item in rows
+        ]
+
+    async def _fetch_price_okx(self, symbol: str) -> float:
+        params = {"instId": self._to_okx_symbol(symbol)}
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.get(f"{OKX_API}/api/v5/market/ticker", params=params)
+            response.raise_for_status()
+            data = response.json()
+        if str(data.get("code", "-1")) != "0":
+            raise RuntimeError(data.get("msg") or "unexpected OKX response")
+        items = data.get("data", [])
+        if not items:
+            raise RuntimeError("empty OKX ticker response")
+        return float(items[0]["last"])
+
+    def _map_interval(self, interval: str, mapping: dict[str, str], provider: str) -> str:
+        if interval not in mapping:
+            raise RuntimeError(f"Interval {interval} is not supported by {provider}")
+        return mapping[interval]
+
+    def _to_okx_symbol(self, symbol: str) -> str:
+        if symbol.endswith("USDT"):
+            return f"{symbol[:-4]}-USDT"
+        if symbol.endswith("USDC"):
+            return f"{symbol[:-4]}-USDC"
+        raise RuntimeError(f"Unsupported symbol format for OKX: {symbol}")
 
     async def best_signal(self, symbols: list[str]) -> SignalCandidate | None:
         candidates: list[SignalCandidate] = []

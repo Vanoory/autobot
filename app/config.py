@@ -24,6 +24,7 @@ class Config:
     price_monitor_interval_minutes: int
     max_open_signals: int
     signal_symbols: list[str]
+    market_data_providers: list[str]
     openrouter_api_key: str | None
     openrouter_model: str
     groq_api_key: str | None
@@ -73,6 +74,12 @@ def load_config() -> Config:
             os.getenv(
                 "SIGNAL_SYMBOLS",
                 "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT,ADAUSDT,LINKUSDT",
+            )
+        ),
+        market_data_providers=_parse_csv(
+            os.getenv(
+                "MARKET_DATA_PROVIDERS",
+                "BYBIT,OKX,BINANCE",
             )
         ),
         openrouter_api_key=_optional("OPENROUTER_API_KEY"),
