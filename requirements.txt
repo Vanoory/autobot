@@ -1,0 +1,11 @@
+python-telegram-bot[job-queue]==22.1
+httpx==0.28.1
+python-dotenv==1.1.0
+aiosqlite==0.20.0
+pandas==2.2.3
+numpy==2.2.6
+matplotlib==3.10.3
+Pillow==11.2.1
+feedparser==6.0.11
+pypdf==5.5.0
+python-docx==1.1.2
